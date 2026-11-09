@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contagem de Estoque</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --txt:#1c1e21; --mut:#6b7280; --ok:#16a34a; --err:#dc2626; --pri:#2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --card:#1e2127; --txt:#eceef1; --mut:#9aa1ad; } }
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  body { margin:auto; padding:12px; background:var(--bg); color:var(--txt); font:16px system-ui,sans-serif; max-width:600px; }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:12px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .mut { color:var(--mut); font-size:13px; }
+  input, textarea { width:100%; font-size:20px; padding:10px; border:2px solid var(--mut); border-radius:10px; background:var(--bg); color:var(--txt); margin-top:8px; font-family:inherit; }
+  textarea { font-size:14px; min-height:140px; font-family:monospace; }
+  input[type=file] { font-size:14px; border:0; padding:0; }
+  #scan { border-color:var(--pri); margin-top:10px; }
+  .row { display:flex; gap:8px; align-items:center; margin-top:10px; }
+  .row input { margin-top:0; }
+  button { font-size:16px; padding:10px 14px; border:0; border-radius:10px; background:var(--pri); color:#fff; }
+  button.sec { background:var(--mut); }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tabs button { flex:1; background:var(--card); color:var(--txt); }
+  .tabs button.on { background:var(--pri); color:#fff; }
+  #qtd { width:90px; text-align:center; }
+  #res { border-left:8px solid var(--mut); }
+  #res.ok { border-color:var(--ok); } #res.err { border-color:var(--err); }
+  #res .d { font-size:20px; font-weight:600; }
+  #cam { width:100%; display:none; margin-top:10px; }
+  .stats { display:flex; justify-content:space-between; font-size:14px; }
+  #cad { cursor:pointer; }
+  ul { list-style:none; padding:0; margin:8px 0 0; font-size:14px; }
+  li { padding:6px 0; border-top:1px solid var(--bg); display:flex; justify-content:space-between; gap:8px; }
+  li.err { color:var(--err); }
+  .warn { color:var(--err); font-size:13px; margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="tabs"><button id="t1" class="on">Contar</button><button id="t2">Cadastro</button></div>
+
+<div id="p1">
+  <div class="card">
+    <h1>Contagem de Estoque</h1>
+    <div class="stats mut"><span id="cad">Carregando cadastro…</span><span id="pend"></span></div>
+    <input id="scan" inputmode="none" autocomplete="off" placeholder="Bipe o código aqui">
+    <div class="row">
+      <span class="mut">Qtd:</span><input id="qtd" type="number" min="1" value="1" inputmode="numeric">
+      <button id="bcam" class="sec">📷 Câmera</button>
+    </div>
+    <div id="cam"></div>
+  </div>
+  <div id="res" class="card"><div class="mut">Aguardando leitura…</div></div>
+  <div class="card">
+    <div class="stats"><b>Últimos bipes</b><span class="mut">Total na sessão: <span id="tot">0</span></span></div>
+    <ul id="hist"></ul>
+  </div>
+</div>
+
+<div id="p2" hidden>
+  <div class="card">
+    <h1>Cadastrar produto</h1>
+    <input id="f1" placeholder="Código de barras" inputmode="numeric" autocomplete="off">
+    <input id="f2" placeholder="SKU" autocomplete="off">
+    <input id="f3" placeholder="Descrição" autocomplete="off">
+    <div class="row"><button id="salvar">Salvar produto</button></div>
+  </div>
+  <div class="card">
+    <h1>Cadastro em massa</h1>
+    <div class="mut">Cole do Excel/Sheets (colunas: Código de barras, SKU, Descrição) ou escolha um arquivo .csv. Código novo é adicionado; código já existente tem SKU/descrição atualizados.</div>
+    <textarea id="massa" placeholder="7891234567890&#9;ABC-01&#9;PRODUTO EXEMPLO"></textarea>
+    <input type="file" id="arq" accept=".csv,.txt,.tsv">
+    <div id="prev" class="mut" style="margin-top:6px"></div>
+    <div id="aviso" class="warn"></div>
+    <div class="row"><button id="importar">Importar</button></div>
+  </div>
+  <div id="msg" class="card mut" hidden></div>
+</div>
+
+<div class="mut" style="text-align:center"><a href="#" id="cx" hidden>trocar conexão</a></div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const EMBED = !!(window.google && google.script && google.script.run);
+const $ = id => document.getElementById(id);
+const ls = (k, v) => { try { if (v === undefined) return localStorage.getItem(k) || ''; localStorage.setItem(k, v); } catch (e) { return ''; } };
+let cadastro = {}, fila = [], enviando = false, total = 0, ultimo = {c:'', t:0}, qr = null;
+
+// Mesma página funciona dentro do Apps Script (google.script.run) ou hospedada fora (fetch)
+function chamar(fn, arg) {
+  return new Promise((ok, erro) => {
+    if (EMBED) { google.script.run.withSuccessHandler(ok).withFailureHandler(erro)[fn](arg); return; }
+    fetch(ls('api'), {method:'POST', headers:{'Content-Type':'text/plain'}, body: JSON.stringify({fn, arg, chave: ls('chave')})})
+      .then(r => r.json()).then(j => j.erro ? erro(new Error(j.erro)) : ok(j.dados)).catch(erro);
+  });
+}
+function conexao(forcar) {
+  if (EMBED) return true;
+  if (forcar || !ls('api')) {
+    const u = prompt('Cole a URL do app (termina em /exec):', ls('api'));
+    if (!u) return !!ls('api');
+    const k = prompt('Senha (a mesma definida em Code.gs):', ls('chave'));
+    ls('api', u.trim()); ls('chave', (k || '').trim());
+  }
+  return !!ls('api');
+}
+
+function aba(n) {
+  $('p1').hidden = n !== 1; $('p2').hidden = n !== 2;
+  $('t1').className = n === 1 ? 'on' : ''; $('t2').className = n === 2 ? 'on' : '';
+  if (n === 1) $('scan').focus();
+}
+$('t1').onclick = () => aba(1); $('t2').onclick = () => aba(2);
+
+function bip(ok) {
+  try {
+    const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator();
+    o.frequency.value = ok ? 1000 : 300; o.connect(a.destination); o.start(); o.stop(a.currentTime + (ok ? 0.08 : 0.35));
+  } catch (e) {}
+  if (!ok && navigator.vibrate) navigator.vibrate(300);
+}
+
+function processar(codigo) {
+  codigo = String(codigo).trim();
+  if (!codigo) return;
+  const agora = Date.now();
+  if (codigo === ultimo.c && agora - ultimo.t < 1200) return;
+  ultimo = {c: codigo, t: agora};
+  const q = Math.max(1, parseInt($('qtd').value) || 1), p = cadastro[codigo];
+  bip(!!p);
+  fila.push({ts: agora, code: codigo, qty: q});
+  total += q; $('tot').textContent = total;
+  const res = $('res'); res.className = 'card ' + (p ? 'ok' : 'err'); res.innerHTML = '';
+  const d = document.createElement('div'); d.className = 'd'; d.textContent = p ? p[1] : 'NÃO CADASTRADO';
+  const s = document.createElement('div'); s.className = 'mut'; s.textContent = (p ? p[0] + ' · ' : '') + codigo + ' · Qtd ' + q;
+  res.append(d, s);
+  if (!p) {
+    const bt = document.createElement('button'); bt.textContent = '+ Cadastrar este código'; bt.style.marginTop = '8px';
+    bt.onclick = () => { aba(2); $('f1').value = codigo; $('f2').focus(); };
+    res.append(bt);
+  }
+  const li = document.createElement('li'); if (!p) li.className = 'err';
+  const a = document.createElement('span'); a.textContent = p ? p[1] : codigo;
+  const b = document.createElement('b'); b.textContent = '×' + q;
+  li.append(a, b); $('hist').prepend(li);
+  while ($('hist').children.length > 10) $('hist').lastChild.remove();
+  $('qtd').value = 1; atualizaPend(); enviar();
+}
+function atualizaPend() { $('pend').textContent = fila.length ? '⏳ ' + fila.length + ' a enviar' : '✓ tudo salvo'; }
+function enviar() {
+  if (enviando || !fila.length) return;
+  enviando = true;
+  const lote = fila.slice();
+  chamar('registrar', lote)
+    .then(() => { fila.splice(0, lote.length); enviando = false; atualizaPend(); enviar(); })
+    .catch(() => { enviando = false; setTimeout(enviar, 3000); });
+}
+$('scan').addEventListener('keydown', e => { if (e.key === 'Enter') { processar($('scan').value); $('scan').value = ''; } });
+document.addEventListener('click', e => { if (!$('p1').hidden && !/INPUT|BUTTON|A/.test(e.target.tagName) && e.target.id !== 'cad') $('scan').focus(); });
+
+$('bcam').onclick = async () => {
+  const el = $('cam'), reset = () => { qr = null; el.style.display = 'none'; $('bcam').textContent = '📷 Câmera'; };
+  if (qr) { await qr.stop(); reset(); return; }
+  el.style.display = 'block'; $('bcam').textContent = '⏹ Parar câmera';
+  qr = new Html5Qrcode('cam');
+  qr.start({facingMode:'environment'}, {fps:10, qrbox:{width:280, height:140}}, processar)
+    .catch(err => {
+      alert(EMBED ? 'O Google bloqueia a câmera nesta página. Abra a versão hospedada (celular) ou use um leitor Bluetooth.' : 'Não foi possível abrir a câmera: ' + err);
+      reset();
+    });
+};
+
+function carregar() {
+  if (!conexao()) return;
+  $('cad').textContent = 'Carregando cadastro…';
+  chamar('getCadastro').then(m => { cadastro = m; $('cad').textContent = Object.keys(m).length + ' produtos · ↻'; atualizaPend(); })
+    .catch(e => { $('cad').textContent = 'Erro: ' + (e.message || e) + ' · toque para tentar'; });
+}
+$('cad').onclick = carregar;
+
+// ---- Cadastro ----
+function msg(t) { $('msg').hidden = false; $('msg').textContent = t; }
+async function enviarCad(linhas) {
+  const r = {add:0, upd:0, dup:0};
+  try {
+    for (let i = 0; i < linhas.length; i += 500) {
+      msg('Enviando ' + Math.min(i + 500, linhas.length) + '/' + linhas.length + '…');
+      const x = await chamar('importarCadastro', linhas.slice(i, i + 500));
+      r.add += x.add; r.upd += x.upd; r.dup += x.dup;
+    }
+    msg('✓ ' + r.add + ' novos, ' + r.upd + ' atualizados' + (r.dup ? ', ' + r.dup + ' repetidos ignorados' : ''));
+    carregar();
+  } catch (e) { msg('Erro: ' + (e.message || e)); throw e; }
+}
+$('salvar').onclick = () => {
+  const c = $('f1').value.trim(), s = $('f2').value.trim(), d = $('f3').value.trim();
+  if (!c) return msg('Informe o código de barras.');
+  if (cadastro[c] && !confirm('Código já cadastrado (' + cadastro[c][1] + '). Atualizar?')) return;
+  enviarCad([[c, s, d]]).then(() => { $('f1').value = $('f2').value = $('f3').value = ''; $('f1').focus(); }).catch(() => {});
+};
+['f1', 'f2'].forEach((id, i) => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') $(['f2', 'f3'][i]).focus(); }));
+$('f3').addEventListener('keydown', e => { if (e.key === 'Enter') $('salvar').click(); });
+
+function parse(txt) {
+  return txt.split(/\r?\n/).filter(l => l.trim()).map(l => {
+    const sep = l.includes('\t') ? '\t' : l.includes(';') ? ';' : ',';
+    const p = l.split(sep).map(x => x.trim().replace(/^"|"$/g, ''));
+    return [p[0], p[1] || '', p.slice(2).join(sep)];
+  }).filter((r, i) => !(i === 0 && /c[oó]digo|barras|ean/i.test(r[0])));
+}
+function previa() {
+  const l = parse($('massa').value);
+  const novos = l.filter(r => !cadastro[r[0]]).length;
+  $('prev').textContent = l.length ? l.length + ' linhas: ' + novos + ' novas, ' + (l.length - novos) + ' já existem (serão atualizadas)' : '';
+  const sci = l.filter(r => /[eE]\+/.test(r[0])).length;
+  $('aviso').textContent = sci ? '⚠ ' + sci + ' código(s) em notação científica (ex.: 7,9E+12). Formate a coluna como texto na planilha de origem e cole de novo.' : '';
+}
+$('massa').addEventListener('input', previa);
+$('arq').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader(); r.onload = () => { $('massa').value = r.result; previa(); }; r.readAsText(f);
+};
+$('importar').onclick = () => {
+  const l = parse($('massa').value);
+  if (!l.length) return msg('Nada para importar.');
+  enviarCad(l).then(() => { $('massa').value = ''; $('prev').textContent = ''; $('aviso').textContent = ''; }).catch(() => {});
+};
+
+if (!EMBED) { $('cx').hidden = false; $('cx').onclick = e => { e.preventDefault(); conexao(true); carregar(); }; }
+carregar(); $('scan').focus();
+</script>
+</body>
+</html>
