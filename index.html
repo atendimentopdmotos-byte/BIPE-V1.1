@@ -69,9 +69,9 @@
   </div>
   <div class="card">
     <h1>Cadastro em massa</h1>
-    <div class="mut">Cole do Excel/Sheets (colunas: Código de barras, SKU, Descrição) ou escolha um arquivo .csv. Código novo é adicionado; código já existente tem SKU/descrição atualizados.</div>
+    <div class="mut">Cole do Excel/Sheets (colunas: Código de barras, SKU, Descrição) ou escolha um arquivo .xlsx / .csv. Código novo é adicionado; código já existente tem SKU/descrição atualizados.</div>
     <textarea id="massa" placeholder="7891234567890&#9;ABC-01&#9;PRODUTO EXEMPLO"></textarea>
-    <input type="file" id="arq" accept=".csv,.txt,.tsv">
+    <input type="file" id="arq" accept=".xlsx,.xls,.csv,.txt,.tsv">
     <div id="prev" class="mut" style="margin-top:6px"></div>
     <div id="aviso" class="warn"></div>
     <div class="row"><button id="importar">Importar</button></div>
@@ -82,6 +82,7 @@
 <div class="mut" style="text-align:center"><a href="#" id="cx" hidden>trocar conexão</a></div>
 
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
 const EMBED = !!(window.google && google.script && google.script.run);
 const $ = id => document.getElementById(id);
@@ -93,7 +94,10 @@ function chamar(fn, arg) {
   return new Promise((ok, erro) => {
     if (EMBED) { google.script.run.withSuccessHandler(ok).withFailureHandler(erro)[fn](arg); return; }
     fetch(ls('api'), {method:'POST', headers:{'Content-Type':'text/plain'}, body: JSON.stringify({fn, arg, chave: ls('chave')})})
-      .then(r => r.json()).then(j => j.erro ? erro(new Error(j.erro)) : ok(j.dados)).catch(erro);
+      .then(r => r.text()).then(t => {
+        let j; try { j = JSON.parse(t); } catch (e) { throw new Error('A URL /exec devolveu uma página HTML em vez de dados. Verifique: acesso "Qualquer pessoa" e Nova versão da implantação.'); }
+        j.erro ? erro(new Error(j.erro)) : ok(j.dados);
+      }).catch(erro);
   });
 }
 function conexao(forcar) {
@@ -220,7 +224,18 @@ function previa() {
 $('massa').addEventListener('input', previa);
 $('arq').onchange = e => {
   const f = e.target.files[0]; if (!f) return;
-  const r = new FileReader(); r.onload = () => { $('massa').value = r.result; previa(); }; r.readAsText(f);
+  const r = new FileReader();
+  if (/\.xlsx?$/i.test(f.name)) {
+    r.onload = () => {
+      try {
+        const wb = XLSX.read(r.result, {type:'array'});
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, raw:true, defval:''});
+        $('massa').value = rows.map(l => l.slice(0, 3).map(v => typeof v === 'number' ? String(v) : String(v).trim()).join('\t')).filter(l => l.replace(/\t/g, '')).join('\n');
+        previa();
+      } catch (err) { msg('Não consegui ler o Excel: ' + err.message); }
+    };
+    r.readAsArrayBuffer(f);
+  } else { r.onload = () => { $('massa').value = r.result; previa(); }; r.readAsText(f); }
 };
 $('importar').onclick = () => {
   const l = parse($('massa').value);
